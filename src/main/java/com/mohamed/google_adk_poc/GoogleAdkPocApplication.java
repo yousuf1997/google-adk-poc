@@ -65,6 +65,7 @@ public class GoogleAdkPocApplication implements CommandLineRunner {
 						System.out.println(event.stringifyContent());
 					}
 				});
+
 			}
 		}
 	}
