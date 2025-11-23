@@ -1,0 +1,8 @@
+spring:
+  application:
+    name: google-adk-poc
+
+
+database:
+  connection:
+    string: '${MONGO_DB_CONNECTION_STRING}'
