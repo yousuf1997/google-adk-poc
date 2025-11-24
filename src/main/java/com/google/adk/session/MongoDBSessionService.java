@@ -29,42 +29,68 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
+
+/**
+ * MongoDBSessionService manages session data and state information for the Agent.
+ *
+ * This service requires the user to provide:
+ *  1) A MongoTemplate instance
+ *  2) Two collection names:
+ *      - sessionUserStateCollectionName : Stores per-user sessions and user-specific states
+ *      - appStateCollectionName         : Stores application-level state
+ *
+ * -----------------------
+ * MongoDB Document Models
+ * -----------------------
+ *
+ * Collection: session_and_user_state
+ * ----------------------------------
+ * Stores per-user session information and user-specific state entries.
+ *
+ * {
+ *   "appName": "",
+ *   "userId": "",
+ *   "sessions": [
+ *     {
+ *       "sessionId": "",
+ *       "session": {
+ *         // Session-specific data
+ *       }
+ *     }
+ *   ],
+ *   "userStates": [
+ *     {
+ *       "stateKey": "",
+ *       "stateValue": {
+ *         // Arbitrary user-specific state object
+ *       }
+ *     }
+ *   ]
+ * }
+ *
+ *
+ * Collection: app_state
+ * ----------------------
+ * Stores application-wide state that is NOT tied to any userId.
+ * This collection is separate from the user session collection because
+ * these states are global to the application, not user-scoped.
+ *
+ * {
+ *   "appName": "",
+ *   "appStates": [
+ *     {
+ *       "stateKey": "",
+ *       "stateValue": {
+ *         // Arbitrary app-level state object
+ *       }
+ *     }
+ *   ]
+ * }
+ */
+
 @Service
 public class MongoDBSessionService  implements BaseSessionService {
 
-    /***
-     * Document structure to store the session, and states information on mongodb.
-     *  - session_and_user_state
-     * {
-     *     "appName" : "",
-     *     "userId" : "",
-     *     "sessions" : [
-     *       {
-     *           "sessionId" : "",
-     *           "session" : {
-     *
-     *           }
-     *       }
-     *     ],
-     *     "userStates" : [
-     *        {
-     *            "stateKey": "",
-     *           "stateValue" : {}
-     *        }
-     *     ]
-     * }
-     * -- app_state
-     * {
-     *     "appName" : "",
-     *     "appStates" : [
-     *       {
-     *           "stateKey" : "",
-     *           "stateValue" : {}
-     *       }
-     *     ]
-     * }
-     *
-     */
 
     private final MongoTemplate mongoTemplate;
     private final String sessionUserStateCollection;
@@ -218,7 +244,7 @@ public class MongoDBSessionService  implements BaseSessionService {
         }
 
         // Get the sessions Map
-        List<Map<String, Object>> sessionsMap = objectMapper.convertValue(results.getFirst().get(0), new TypeReference<List<Map<String, Object>>>() {});
+        List<Map<String, Object>> sessionsMap = objectMapper.convertValue(results.getFirst(), new TypeReference<List<Map<String, Object>>>() {});
 
         return sessionsMap
                 .stream()

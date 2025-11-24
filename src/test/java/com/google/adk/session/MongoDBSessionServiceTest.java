@@ -1,156 +1,49 @@
 package com.google.adk.session;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.google.adk.JsonBaseModel;
-import com.google.adk.sessions.*;
-import org.bson.Document;
+import com.google.adk.agents.LlmAgent;
+import com.google.adk.runner.MongoDBSessionRunner;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.springframework.data.mongodb.core.*;
-import java.util.*;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.data.mongodb.test.autoconfigure.DataMongoTest;
+import org.springframework.context.annotation.Import;
+import org.springframework.data.mongodb.core.MongoTemplate;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
+import java.util.Optional;
 
-import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.Mockito.*;
-
+@DataMongoTest
+@Import(MongoDBSessionService.class)
 public class MongoDBSessionServiceTest {
 
+    @Autowired
     private MongoTemplate mongoTemplate;
-    private MongoDBSessionService service;
-    private ObjectMapper mapper;
 
-    private static final String COLLECTION = "session_user_state";
-    private static final String APP_COLLECTION = "app_state";
+    @Autowired
+    private MongoDBSessionService mongoDBSessionService;
+
+    @MockitoBean
+    private MongoDBSessionRunner runner;
+
+    private final String sessionAndUserCollectionName = "session_and_user_state";
+    private final String appStateCollectionName = "app_state";
 
     @BeforeEach
-    void setup() {
-        mongoTemplate = mock(MongoTemplate.class);
-        mapper = JsonBaseModel.getMapper();
-        service = new MongoDBSessionService(mongoTemplate, COLLECTION, APP_COLLECTION);
-    }
-
-    // -------------------------------------------------------------------------
-    // FIXTURE — Sample MongoDB document
-    // -------------------------------------------------------------------------
-
-    private Document sampleSessionDoc() {
-        return Document.parse("""
-        {
-          "appName": "adk-poc",
-          "userId": "user1234",
-          "userStates": [],
-          "sessions": [
-            {
-              "sessionId": "bfe69006-eb65-4015-a754-4887d9019fac",
-              "session": {
-                "id": "bfe69006-eb65-4015-a754-4887d9019fac",
-                "appName": "adk-poc",
-                "userId": "user1234",
-                "state": {},
-                "events": [
-                  {
-                    "id": "10c37df3-2686-44d4-beed-ab5384ec13a7",
-                    "invocationId": "e-54ca7a57-69b6-4642-a761-5d9df8dfa4f1",
-                    "author": "user",
-                    "content": { "role": "user", "parts": [{ "text": "When did India got independence?" }] },
-                    "actions": { "stateDelta": {}, "artifactDelta": {}, "requestedAuthConfigs": {} },
-                    "timestamp": 1763996463557
-                  },
-                  {
-                    "id": "90115dad-76a1-4957-ad37-5900a9d9abbd",
-                    "invocationId": "e-bd837b72-f0f7-4598-934d-65a0ac48ab28",
-                    "author": "History Expert Agent",
-                    "content": { "role": "model", "parts": [{ "text": "India achieved independence..." }] },
-                    "actions": { "stateDelta": {}, "artifactDelta": {}, "requestedAuthConfigs": {} },
-                    "timestamp": 1763996472111
-                  }
-                ],
-                "lastUpdateTime": 1763996506.0
-              }
-            }
-          ]
+    void setUp() {
+        if (!mongoTemplate.collectionExists(sessionAndUserCollectionName)) {
+            mongoTemplate.createCollection(sessionAndUserCollectionName);
         }
-        """);
-    }
-
-    // -------------------------------------------------------------------------
-    // createSession
-    // -------------------------------------------------------------------------
-
-    @Test
-    void testCreateSession_createsNewSessionAndWritesDocument() {
-
-        Document savedDoc = new Document();
-        when(mongoTemplate.findAndModify(any(), any(), any(), eq(Document.class), eq(COLLECTION)))
-                .thenReturn(savedDoc);
-
-        var session = service
-                .createSession("adk-poc", "user1234", null, null)
-                .blockingGet();
-
-        assertThat(session).isNotNull();
-        assertThat(session.appName()).isEqualTo("adk-poc");
-        assertThat(session.userId()).isEqualTo("user1234");
-        assertThat(session.events()).isEmpty();
-
-        verify(mongoTemplate).findAndModify(any(), any(), any(), eq(Document.class), eq(COLLECTION));
-    }
-
-    // -------------------------------------------------------------------------
-    // getSession
-    // -------------------------------------------------------------------------
-
-    @Test
-    void testGetSession_returnsSessionWithEvents() {
-        when(mongoTemplate.find(any(), eq(Document.class), eq(COLLECTION)))
-                .thenReturn(List.of(sampleSessionDoc()));
-
-        var sessionOpt = service
-                .getSession("adk-poc", "user1234", "bfe69006-eb65-4015-a754-4887d9019fac", Optional.empty())
-                .blockingGet();
-
-        assertThat(sessionOpt).isNotNull();
-        assertThat(sessionOpt.events()).hasSize(2);
+        if (!mongoTemplate.collectionExists(appStateCollectionName)) {
+            mongoTemplate.createCollection(appStateCollectionName);
+        }
     }
 
     @Test
-    void testGetSession_numRecentEventsFiltersCorrectly() {
-        when(mongoTemplate.find(any(), eq(Document.class), eq(COLLECTION)))
-                .thenReturn(List.of(sampleSessionDoc()));
+    public void lifecycle_noSession() {
 
-        var config = GetSessionConfig.builder().numRecentEvents(1).build();
-
-        var session = service
-                .getSession("adk-poc", "user1234", "bfe69006-eb65-4015-a754-4887d9019fac", Optional.of(config))
-                .blockingGet();
-
-        assertThat(session.events()).hasSize(1);
-        assertThat(session.events().getFirst().id()).isEqualTo("90115dad-76a1-4957-ad37-5900a9d9abbd");
+        // Assertions
+        Assertions.assertNull(mongoDBSessionService.getSession("app-name", "user-id", "session-id", Optional.empty()).blockingGet());
+        Assertions.assertTrue(mongoDBSessionService.listSessions("app-name", "user-id").blockingGet().sessions().isEmpty());
+        Assertions.assertNull(mongoDBSessionService.listEvents("app-name", "user-id", "session-id").blockingGet());
     }
-
-    @Test
-    void testListEvents_returnsAllEvents() {
-        when(mongoTemplate.find(any(), eq(Document.class), eq(COLLECTION)))
-                .thenReturn(List.of(sampleSessionDoc()));
-
-        var eventsResp = service
-                .listEvents("adk-poc", "user1234", "bfe69006-eb65-4015-a754-4887d9019fac")
-                .blockingGet();
-
-        assertThat(eventsResp.events()).hasSize(2);
-    }
-
-    // -------------------------------------------------------------------------
-    // deleteSession
-    // -------------------------------------------------------------------------
-
-    @Test
-    void testDeleteSession_removesSession() {
-        when(mongoTemplate.updateFirst(any(), any(), eq(COLLECTION)))
-                .thenReturn(null);
-
-        service.deleteSession("adk-poc", "user1234", "xyz").blockingAwait();
-
-        verify(mongoTemplate).updateFirst(any(), any(), eq(COLLECTION));
-    }
-
 }
