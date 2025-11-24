@@ -8,22 +8,27 @@ import com.google.adk.events.EventActions;
 import com.google.adk.sessions.*;
 import com.google.adk.utils.CollectionUtils;
 import com.mongodb.BasicDBObject;
+import com.mongodb.client.result.UpdateResult;
 import io.reactivex.rxjava3.core.Completable;
 import io.reactivex.rxjava3.core.Maybe;
 import io.reactivex.rxjava3.core.Single;
 import io.reactivex.rxjava3.schedulers.Schedulers;
 import org.bson.Document;
 import org.jetbrains.annotations.Nullable;
+import org.springframework.data.mongodb.core.BulkOperations;
 import org.springframework.data.mongodb.core.FindAndModifyOptions;
 import org.springframework.data.mongodb.core.MongoTemplate;
 import org.springframework.data.mongodb.core.query.Criteria;
 import org.springframework.data.mongodb.core.query.Query;
 import org.springframework.data.mongodb.core.query.Update;
+import org.springframework.data.util.Pair;
 
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.stream.Collectors;
 
 final public class MongoDBSessionService  implements BaseSessionService {
 
@@ -208,50 +213,121 @@ final public class MongoDBSessionService  implements BaseSessionService {
 
     @Override
     public Single<Event> appendEvent(Session session, Event event) {
-        Objects.requireNonNull(session, "session cannot be null");
-        Objects.requireNonNull(event, "event cannot be null");
-        if ((Boolean)event.partial().orElse(false)) {
-            return Single.just(event);
-        } else {
+        return Single.fromCallable(() -> {
+
+            Objects.requireNonNull(session, "session cannot be null");
+            Objects.requireNonNull(event, "event cannot be null");
+            Objects.requireNonNull(session.appName(), "session.appName cannot be null");
+            Objects.requireNonNull(session.userId(), "session.userId cannot be null");
+            Objects.requireNonNull(session.id(), "session.id cannot be null");
+
+            String appName = session.appName();
+            String userId = session.userId();
+            String sessionId = session.id();
+
+            // Temporary holder for user state
+            List<Map<String, Object>> userStates = new ArrayList<>();
+            List<Map<String, Object>> appStates = new ArrayList<>();
+
+            // --- Update User/App State (Same as before) ---
             EventActions actions = event.actions();
             if (actions != null) {
-                ConcurrentMap<String, Object> stateDelta = actions.stateDelta();
+                Map<String, Object> stateDelta = actions.stateDelta();
                 if (stateDelta != null && !stateDelta.isEmpty()) {
-                    ConcurrentMap<String, Object> sessionState = session.state();
-                    if (sessionState != null) {
-                        stateDelta.forEach((key, value) -> {
-                            if (!key.startsWith("temp:")) {
-                                if (value == State.REMOVED) {
-                                    sessionState.remove(key);
-                                } else {
-                                    sessionState.put(key, value);
-                                }
-                            }
+                    stateDelta.forEach(
+                            (key, value) -> {
+                                if (key.startsWith(State.APP_PREFIX)) {
+                                    String appStateKey = key.substring(State.APP_PREFIX.length());
+                                    appStates.add(Map.of("stateKey", appStateKey, "stateValue", value));
 
-                        });
-                    }
+                                } else if (key.startsWith(State.USER_PREFIX)) {
+                                    String userStateKey = key.substring(State.USER_PREFIX.length());
+                                    userStates.add(Map.of("stateKey", userStateKey, "stateValue", value));
+                                } else {
+                                    session.state().put(key, value);
+                                }
+                            });
                 }
             }
 
-            List<Event> sessionEvents = session.events();
-            if (sessionEvents != null) {
-                sessionEvents.add(event);
-            }
+            BaseSessionService.super.appendEvent(session, event);
+            session.lastUpdateTime(getInstantFromEvent(event));
 
-            // update the db
+            // TODO : Following things can be made transactional since it involves updating two separate collections.
+
+            // update the db session data
             Query query = Query.query(Criteria.where("appName").is(session.appName())
                     .and("userId").is(session.userId())
                     .and("sessions.sessionId").is(session.id()));
-
             Map<String, Object> sessionEntry = new HashMap<>();
             sessionEntry.put("sessionId", session.id());
             sessionEntry.put("session", objectMapper.convertValue(session, new TypeReference<Map<String, Object>>() {}));
-
-            Update update = new Update().set("sessions.$", sessionEntry);
+            Update update = new Update().push("userStates").each(userStates).set("sessions.$", sessionEntry);
             // Execute Atomic Update
             mongoTemplate.updateFirst(query, update, sessionUserStateCollection);
-            return Single.just(event);
-        }
+
+            if (!appStates.isEmpty()) {
+
+                BulkOperations bulkOperations = mongoTemplate.bulkOps(BulkOperations.BulkMode.ORDERED, Document.class, this.appStateCollection);
+
+                // get the stateKeys of the app
+                Map<String, Object> appStateKeyValues = appStates
+                        .stream()
+                        .flatMap(stringObjectMap -> stringObjectMap.keySet().stream())
+                        .collect(Collectors.toMap(o -> {
+                            return "stateKey";
+                        }, o -> {
+                            return o;
+                        }));
+
+                // delete duplicates
+                Query appMatchingQuery = Query.query(Criteria.where("appName").is(session.appName()));
+                Update pullOld = new Update().pull("userStates", new BasicDBObject("stateKey", appStateKeyValues));
+                // add new states
+                Update addNew = new Update().push("userStates").each(appStates);
+
+                // Execute Atomic Update
+                bulkOperations.updateOne(
+                        List.of(
+                                Pair.of(appMatchingQuery, pullOld),
+                                Pair.of(appMatchingQuery, addNew)
+                        )
+                );
+            }
+
+            // update session and user state
+            mergeSessionWithAppState(session, session.appName());
+            mergeSessionWithUserState(session, userStates);
+
+            return event;
+        });
+    }
+
+    private void updateAppState(String appName, String appStateKey, Object value) {
+        Query query = Query.query(Criteria.where("appName").is(appName));
+        Map<String, Object> appStateEntry = new HashMap<>();
+
+        appStateEntry.put("stateKey", appStateKey);
+        appStateEntry.put("stateValue", value);
+
+        Update update = new Update()
+                .setOnInsert("appName", appName) // Run only if doc is created
+                .push("appStates", appStateEntry); // Run always
+
+        mongoTemplate.findAndModify(
+                query,
+                update,
+                FindAndModifyOptions.options().returnNew(true).upsert(true),
+                Document.class,
+                this.appStateCollection
+        );
+    }
+
+    private Instant getInstantFromEvent(Event event) {
+        double epochSeconds = getEventTimestampEpochSeconds(event);
+        long seconds = (long) epochSeconds;
+        long nanos = (long) ((epochSeconds % 1.0) * 1_000_000_000L);
+        return Instant.ofEpochSecond(seconds, nanos);
     }
 
     ///  --- Helpers --
@@ -305,6 +381,15 @@ final public class MongoDBSessionService  implements BaseSessionService {
             String stateKey = (String) appState.get("stateKey");
             Object stateValue = appState.get("stateValue");
             sessionState.put(State.APP_PREFIX + stateKey, stateValue);
+        });
+    }
+
+    private void mergeSessionWithUserState(Session session, List<Map<String, Object>> userStates) {
+        Map<String, Object> sessionState = session.state();
+        // merge states
+        userStates.forEach(userStatesMap -> {
+            for (Map.Entry<String, Object> entry : userStatesMap.entrySet())
+                sessionState.put(State.USER_PREFIX + entry.getKey(), entry.getValue());
         });
     }
 
