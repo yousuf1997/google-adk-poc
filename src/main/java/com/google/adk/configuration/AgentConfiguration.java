@@ -1,4 +1,4 @@
-package com.mohamed.google_adk_poc.configuration;
+package com.google.adk.configuration;
 
 
 import com.google.adk.agents.LlmAgent;

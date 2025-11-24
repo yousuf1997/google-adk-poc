@@ -1,4 +1,4 @@
-package com.mohamed.google_adk_poc;
+package com.google.adk;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
