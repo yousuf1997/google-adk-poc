@@ -276,7 +276,7 @@ public class MongoDBSessionService  implements BaseSessionService {
             EventActions actions = event.actions();
             if (actions != null) {
                 Map<String, Object> stateDelta = actions.stateDelta();
-                if (!CollectionUtils.isNullOrEmpty(stateDelta.keySet())) {
+                if (stateDelta != null && !stateDelta.isEmpty()) {
                     stateDelta.forEach(
                             (key, value) -> {
                                 if (key.startsWith(State.APP_PREFIX)) {
